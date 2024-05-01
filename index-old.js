@@ -3,10 +3,19 @@ const cron = require("node-cron");
 const { exec } = require("child_process");
 const path = require("path");
 const createReadStream = require("fs").createReadStream;
-const fs = require("fs");
+const unlink = require("fs").unlink;
 const process = require("process");
 const { google } = require("googleapis");
 require("dotenv").config();
+const chmod = require("fs").chmod;
+
+chmod(__dirname, 0o777, (err) => {
+  if (err) {
+    console.error("Error granting write access:", err);
+    return;
+  }
+  console.log("Write access granted to the directory:", __dirname);
+});
 
 const pkey = require("./service-account.json");
 
@@ -18,6 +27,7 @@ const SCOPES = ["https://www.googleapis.com/auth/drive.file"];
 app.get("/", (req, res) => {
   res.send("DB Backup Server");
 });
+
 /**
  * Authorize with service account and get jwt client
  *
@@ -31,22 +41,6 @@ async function authorize() {
   );
   await jwtClient.authorize();
   return jwtClient;
-}
-
-function deleteFolderRecursive(folderPath) {
-  if (fs.existsSync(folderPath)) {
-    fs.readdirSync(folderPath).forEach((file) => {
-      const curPath = path.join(folderPath, file);
-      if (fs.lstatSync(curPath).isDirectory()) {
-        // Recursive call if it's a directory
-        deleteFolderRecursive(curPath);
-      } else {
-        // Delete file
-        fs.unlinkSync(curPath);
-      }
-    });
-    fs.rmdirSync(folderPath); // Finally, delete the folder itself
-  }
 }
 
 /**
@@ -65,7 +59,8 @@ async function uploadFile(authClient) {
   // Format the date as yyyy-mm-dd
   const formattedDate = `${year}-${month}-${day}`;
 
-  const fileName = `backup-${formattedDate}.zip`;
+  const fileName = `${process.env.DATABASE}-backup-${formattedDate}.zip`;
+  console.log("filename: ", fileName);
 
   return new Promise((resolve, reject) => {
     const drive = google.drive({ version: "v3", auth: authClient });
@@ -79,7 +74,7 @@ async function uploadFile(authClient) {
       {
         resource: fileMetaData,
         media: {
-          body: createReadStream(`./dump/${fileName}`),
+          body: createReadStream(`./backup/${fileName}`),
           mimeType: `application/zip`,
         },
         fields: "id",
@@ -88,8 +83,18 @@ async function uploadFile(authClient) {
         if (error) return reject(error);
         console.log("dump zip uploaded successfully");
 
-        console.log("deleting the dump folder");
-        deleteFolderRecursive("./dump");
+        console.log("deleting the zip file");
+        // Specify the path to the file you want to delete
+        const filePath = `./backup/${fileName}`;
+
+        // Delete the file
+        unlink(filePath, (err) => {
+          if (err) {
+            console.error("Error deleting file:", err);
+            return;
+          }
+          console.log("File deleted successfully");
+        });
 
         resolve(file);
       }
@@ -98,9 +103,9 @@ async function uploadFile(authClient) {
 }
 
 // Schedule cron job to take MongoDB backup every thursday 12pm
-// testing */15 * * * * * every 15 seconds
-// staging 1 * * * * first minute of every hour
-cron.schedule("1 * * * *", () => {
+cron.schedule("* * * * *", () => {
+  const backupDir = path.join(__dirname, "backup"); // Backup directory in the root of the codebase
+
   // Get today's date
   const today = new Date();
 
@@ -112,15 +117,15 @@ cron.schedule("1 * * * *", () => {
   // Format the date as yyyy-mm-dd
   const formattedDate = `${year}-${month}-${day}`;
 
-  const zipFileName = `backup-${formattedDate}.zip`;
+  const zipFileName = `${process.env.DATABASE}-backup-${formattedDate}.zip`;
 
   // Run mongodump command
   console.log("starting backup!");
   exec(
-    `mongodump --uri=${process.env.MONGO_URL}`, // --out=${__dirname}
+    `mongodump --uri=${process.env.MONGO_URL} --out=${backupDir}`,
     (error, stdout, stderr) => {
       if (error) {
-        console.error(`Error executing mongodump: ${error}`);
+        console.error(`Error executing mongodump: ${error.message}`);
         return;
       }
       console.log(`mongodump stdout: ${stdout}`);
@@ -128,7 +133,7 @@ cron.schedule("1 * * * *", () => {
 
       // Create zip file of the backup directory then removing the folder
       exec(
-        `cd ${__dirname}/dump && zip -r ${zipFileName} test  && rm -rf test`,
+        `cd ${backupDir} && zip -r ${zipFileName} ${process.env.DATABASE} && rm -rf ${process.env.DATABASE}`,
         async (zipError, zipStdout, zipStderr) => {
           if (zipError) {
             console.error(`Error creating zip file: ${zipError.message}`);
